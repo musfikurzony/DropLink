@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DropLink — Download Files</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b5bfd'/%3E%3Cpath d='M16 7v13M10 14l6 6 6-6M9 25h14' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+<style>
+  .box{max-width:640px;margin:0 auto}
+  .hero{display:flex;gap:16px;align-items:flex-start}
+  .hero .ic{width:54px;height:54px;border-radius:14px;background:var(--pri-soft);color:var(--pri);display:grid;place-items:center;flex:none}
+  .hero .ic svg{width:26px;height:26px}
+  .hero h1{margin:0;font-size:22px;line-height:1.3;word-break:break-word}
+  .msg{margin-top:16px;padding:14px 16px;background:var(--bg);border-radius:12px;white-space:pre-wrap;font-size:14.5px;color:var(--ink2)}
+  .acts{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+  .acts .btn.big{flex:1}
+  .flist li .btn{flex:none}
+  .center{text-align:center;padding:30px 10px}
+  .center .ic2{width:64px;height:64px;border-radius:50%;display:grid;place-items:center;margin:0 auto 12px;font-size:28px}
+  #zipProg{margin-top:14px}
+  @media (max-width:520px){ .flist li .pv{display:none} }
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap"><a class="brand" href="#" onclick="return false"><div class="logo"></div><span>DropLink</span></a></div></header>
+<main><div class="wrap"><div class="box">
+
+  <div class="card center" id="sLoad"><p class="muted">Loading…</p></div>
+
+  <div class="card center hide" id="sGone">
+    <div class="ic2" style="background:var(--bad-soft);color:var(--bad)">!</div>
+    <h2 style="margin:0 0 6px" id="goneTitle">Transfer not available</h2>
+    <p class="muted" id="goneTxt" style="margin:0"></p>
+  </div>
+
+  <div class="card hide" id="sLock" style="max-width:420px;margin:0 auto;text-align:center">
+    <div class="ic2" style="background:var(--pri-soft);color:var(--pri);width:64px;height:64px;border-radius:50%;display:grid;place-items:center;margin:0 auto 12px;font-size:26px">🔒</div>
+    <h2 style="margin:0 0 4px" id="lockTitle"></h2>
+    <p class="muted small" style="margin:0 0 16px">This transfer is password protected.</p>
+    <form id="lockForm"><input class="in" id="lpw" type="password" placeholder="Enter password" required>
+      <button class="btn pri big mt" style="width:100%">Unlock</button>
+      <p id="lockErr" class="small" style="color:var(--bad);min-height:18px;margin:8px 0 0"></p></form>
+  </div>
+
+  <div class="hide" id="sReady">
+    <div class="card">
+      <div class="hero">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+        <div style="flex:1;min-width:0">
+          <div class="small muted" id="from"></div>
+          <h1 id="tTitle"></h1>
+          <div class="t-pills" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px" id="pills"></div>
+        </div>
+      </div>
+      <div class="msg hide" id="tMsg"></div>
+      <div class="acts">
+        <button class="btn pri big" id="zipBtn">Download all</button>
+      </div>
+      <div id="zipProg" class="hide"><div class="bar" style="height:8px"><i id="zBar"></i></div><div class="small muted" id="zTxt" style="margin-top:6px"></div></div>
+    </div>
+    <div class="card mt" style="padding:8px 18px">
+      <ul class="flist" id="flist"></ul>
+    </div>
+  </div>
+
+</div></div></main>
+<footer class="credit">Developed by Musfikur Rahman | Copyright © <span class="yr"></span></footer>
+
+<script src="/common.js"></script>
+<script>
+const ID = location.pathname.split('/').filter(Boolean).pop();
+const TK_KEY = 'dl_k_' + ID;
+let T = null, K = '';
+try { K = sessionStorage.getItem(TK_KEY) || ''; } catch (e) {}
+const view = (v) => ['Load', 'Gone', 'Lock', 'Ready'].forEach(x => $('#s' + x).classList.toggle('hide', x !== v));
+
+async function load() {
+  let r, d;
+  try { r = await fetch(`/api/public/${encodeURIComponent(ID)}${K ? '?k=' + encodeURIComponent(K) : ''}`); d = await r.json(); }
+  catch (e) { $('#goneTxt').textContent = 'Could not connect. Please check your internet and refresh.'; return view('Gone'); }
+  if (r.status === 410) {
+    $('#goneTitle').textContent = 'This transfer has expired';
+    $('#goneTxt').textContent = `“${d.title}” was available until ${fmtDate(d.expires_at)}. Please ask the sender to share it again.`;
+    return view('Gone');
+  }
+  if (!r.ok) { $('#goneTxt').textContent = d.error || 'Link not found.'; return view('Gone'); }
+  T = d;
+  document.title = d.title + ' — DropLink';
+  if (d.locked) { $('#lockTitle').textContent = d.title; view('Lock'); $('#lpw').focus(); return; }
+  render();
+}
+$('#lockForm').onsubmit = async (e) => {
+  e.preventDefault(); $('#lockErr').textContent = '';
+  const r = await fetch(`/api/public/${ID}/unlock`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: $('#lpw').value }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { $('#lockErr').textContent = d.error || 'Wrong password'; return; }
+  K = d.token; try { sessionStorage.setItem(TK_KEY, K); } catch (e) {}
+  load();
+};
+const fileUrl = (f, extra = '') => `/api/dl/${ID}/${f.id}?${K ? 'k=' + encodeURIComponent(K) + '&' : ''}${extra}`;
+
+function render() {
+  $('#from').textContent = T.sender ? `${T.sender} sent you` : 'You received';
+  $('#tTitle').textContent = T.title;
+  const soon = T.expires_at - Date.now() < 864e5;
+  $('#pills').innerHTML = `<span class="pill">${T.file_count} file${T.file_count !== 1 ? 's' : ''} · ${fmtSize(T.total_size)}</span>
+    <span class="pill ${soon ? 'warn' : 'ok'}">Expires ${fmtDate(T.expires_at)} · ${timeLeft(T.expires_at)}</span>`;
+  if (T.message) { $('#tMsg').textContent = T.message; $('#tMsg').classList.remove('hide'); }
+  $('#zipBtn').textContent = T.files.length === 1 ? `Download (${fmtSize(T.total_size)})` : `Download all as ZIP (${fmtSize(T.total_size)})`;
+  $('#flist').innerHTML = T.files.map((f, i) => `<li>${fileIcon(f.name)}<div class="fname"><b title="${esc(f.name)}">${esc(f.name)}</b><span>${fmtSize(f.size)}</span></div>
+    ${canPreview(f.name) ? `<a class="btn sm ghost pv" target="_blank" rel="noopener" href="${fileUrl(f, 'inline=1')}">Preview</a>` : ''}
+    <a class="btn sm" href="${fileUrl(f)}" download>Download</a></li>`).join('');
+  view('Ready');
+}
+
+$('#zipBtn').onclick = async () => {
+  const files = T.files;
+  if (files.length === 1) { location.href = fileUrl(files[0]); return; }
+  const zipName = (T.title || 'files').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80) + '.zip';
+  const total = T.total_size;
+  let writable = null;
+  // Best path (Chrome / Edge on PC): stream straight to disk — works for any size
+  if (window.showSaveFilePicker) {
+    try {
+      const h = await showSaveFilePicker({ suggestedName: zipName, types: [{ description: 'ZIP archive', accept: { 'application/zip': ['.zip'] } }] });
+      writable = await h.createWritable();
+    } catch (e) { if (e.name === 'AbortError') return; writable = null; }
+  }
+  if (!writable && total > 1.5 * 1024 ** 3) {
+    alert('These files are too large to zip in this browser. They will download one by one instead.\n(Tip: Google Chrome or Microsoft Edge on a computer can download everything as one ZIP.)');
+    return oneByOne();
+  }
+  $('#zipBtn').disabled = true; $('#zipProg').classList.remove('hide');
+  let got = 0;
+  try {
+    const { downloadZip } = await import('/vendor/client-zip.js');
+    async function* gen() {
+      for (const f of files) {
+        const r = await fetch(fileUrl(f, 'nc=1'));
+        if (!r.ok) throw new Error(`Could not get ${f.name} (${r.status})`);
+        yield { name: f.name, input: r, size: f.size };
+      }
+    }
+    const counter = new TransformStream({ transform(chunk, c) {
+      got += chunk.byteLength; const p = Math.min(100, got / total * 100);
+      $('#zBar').style.width = p + '%'; $('#zTxt').textContent = `${fmtSize(got)} of ${fmtSize(total)} (${Math.floor(p)}%)`;
+      c.enqueue(chunk);
+    } });
+    const stream = downloadZip(gen()).body.pipeThrough(counter);
+    if (writable) {
+      await stream.pipeTo(writable);
+    } else {
+      const blob = await new Response(stream).blob();
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = zipName;
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    }
+    fetch(`/api/public/${ID}/zipped`, { method: 'POST' }).catch(() => {});
+    $('#zBar').parentNode.classList.add('ok'); $('#zTxt').textContent = `Done — saved ${zipName}`;
+  } catch (e) {
+    $('#zTxt').innerHTML = `<span style="color:var(--bad)">ZIP failed: ${esc(e.message)}. Use the Download buttons below instead.</span>`;
+  }
+  $('#zipBtn').disabled = false;
+};
+async function oneByOne() {
+  for (const f of T.files) {
+    const a = document.createElement('a'); a.href = fileUrl(f); a.download = ''; document.body.appendChild(a); a.click(); a.remove();
+    await new Promise(r => setTimeout(r, 1200));
+  }
+}
+load();
+</script>
+</body>
+</html>

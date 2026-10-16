@@ -205,7 +205,7 @@
 <script src="/common.js"></script>
 <script>
 const PART = 16 * 1024 * 1024;   // 16 MB chunks (multiple of 256 KB, as Google Drive requires)
-const PARALLEL = 3;              // files uploaded at the same time
+const PARALLEL = 4;              // files uploaded at the same time
 let ME = {}; let picked = []; let days = 7; let LIST = null; let filter = 'active';
 let currentUpload = null;
 
@@ -355,11 +355,17 @@ async function startUpload() {
   } else body.days = Number(days);
 
   $('#sendBtn').disabled = true;
+  // show progress screen immediately
+  $('#composer').classList.add('hide'); $('#uploading').classList.remove('hide');
+  $('#pPct').textContent = '0%'; $('#pBar').style.width = '0';
+  $('#pInfo').textContent = `Preparing ${picked.length} file${picked.length > 1 ? 's' : ''}…`;
+  $('#pFiles').innerHTML = '';
   let t;
   try { t = await api('transfers', { method: 'POST', body }); }
-  catch (e) { $('#sendBtn').disabled = false; return toast(e.message, 5000); }
-
-  $('#composer').classList.add('hide'); $('#uploading').classList.remove('hide');
+  catch (e) {
+    $('#uploading').classList.add('hide'); $('#composer').classList.remove('hide');
+    $('#sendBtn').disabled = false; return toast(e.message, 6000);
+  }
   const state = { t, cancelled: false, xhrs: new Set() };
   currentUpload = state;
   const items = t.files.map((f, i) => ({ ...f, file: picked[i].file, loaded: f.done ? f.size : 0 }));
@@ -380,7 +386,8 @@ async function startUpload() {
     const pct = Math.min(100, (cur / total) * 100);
     $('#pPct').textContent = Math.floor(pct) + '%'; $('#pBar').style.width = pct + '%';
     const eta = speed > 0 ? (total - cur) / speed : 0;
-    if (!state.retrying) $('#pInfo').textContent = `${fmtSize(cur)} of ${fmtSize(total)} · ${fmtSize(Math.max(0, speed))}/s` + (eta > 1 ? ` · ${eta > 90 ? Math.ceil(eta / 60) + ' min' : Math.ceil(eta) + ' sec'} left` : '');
+    const nDone = items.filter(x => x.done).length;
+    if (!state.retrying) $('#pInfo').textContent = `${nDone} of ${items.length} files done · ${fmtSize(cur)} of ${fmtSize(total)} · ${fmtSize(Math.max(0, speed))}/s` + (eta > 1 ? ` · ${eta > 90 ? Math.ceil(eta / 60) + ' min' : Math.ceil(eta) + ' sec'} left` : '');
     items.forEach((f, i) => {
       if (f.done) return;
       const el = $('#fb' + i); if (el) el.style.width = ((f.loaded + (inflight.get(i) || 0)) / f.size * 100) + '%';
@@ -407,7 +414,18 @@ async function startUpload() {
   }
   async function uploadFile(i) {
     const f = items[i];
-    let off = 0, tries = 0;
+    $('#fs' + i).textContent = 'Starting…';
+    let off = 0, tries = 0, resumed = false;
+    for (;;) {   // open the Google Drive upload for this file
+      try { const st = await api('upload/start?f=' + f.id, { method: 'POST', body: {} }); if (st.done) { finishFile(i); return; } resumed = !!st.resumed; break; }
+      catch (err) {
+        if (state.cancelled || err.status === 404 || ++tries > 5) throw err;
+        await new Promise(r => setTimeout(r, 1500 * tries));
+      }
+    }
+    tries = 0;
+    if (resumed) { try { const s0 = await api('upload/status?f=' + f.id); off = s0.next || 0; if (s0.done) { finishFile(i); return; } } catch (e) {} }
+    $('#fs' + i).textContent = fmtSize(f.size);
     while (!state.cancelled) {
       try {
         const r = await putChunk(i, off, f.file.slice(off, Math.min(f.size, off + PART)));
@@ -423,7 +441,10 @@ async function startUpload() {
       }
     }
     if (state.cancelled) return;
-    f.done = true; f.loaded = f.size;
+    finishFile(i);
+  }
+  function finishFile(i) {
+    const f = items[i]; f.done = true; f.loaded = f.size;
     const el = $('#fb' + i); el.style.width = '100%'; el.parentNode.classList.add('ok'); $('#fs' + i).textContent = 'Done';
   }
 

@@ -1,4 +1,4 @@
-# DropLink v2 — Setup Guide (Google Drive storage, no credit card) 
+# DropLink v3 — Setup Guide (Google Drive storage, no credit card)
 
 Files are stored in a **"DropLink Files"** folder in your Google Drive (15 GB free).
 Emails are sent from your Gmail. The app runs free on Cloudflare Pages + D1.

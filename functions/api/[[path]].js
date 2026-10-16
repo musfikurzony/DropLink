@@ -30,6 +30,7 @@ async function ensureSchema(env) {
     env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_files_transfer ON files(transfer_id)`),
     env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status, expires_at)`),
   ]);
+  try { await env.DB.prepare(`ALTER TABLE transfers ADD COLUMN folder_id TEXT`).run(); } catch (e) {}
   schemaReady = true;
 }
 
@@ -174,7 +175,7 @@ async function usage(env, withDrive = true) {
 }
 
 // Delete expired / abandoned transfers and their Drive files
-async function cleanup(env, max = 15) {
+async function cleanup(env, max = 10) {
   const now = Date.now();
   const { results } = await env.DB.prepare(
     `SELECT id, status FROM transfers WHERE (status='ready' AND expires_at < ?) OR (status='uploading' AND created_at < ?) LIMIT ?`
@@ -183,10 +184,13 @@ async function cleanup(env, max = 15) {
   return results.length;
 }
 async function purge(env, tid, newStatus) {
-  const { results: files } = await env.DB.prepare(`SELECT id, drive_id, session_url, done FROM files WHERE transfer_id=?`).bind(tid).all();
-  for (const f of files) {
-    if (f.drive_id) await driveDelete(env, f.drive_id);
-    else if (f.session_url) { try { await fetch(f.session_url, { method: 'DELETE' }); } catch (e) {} }
+  const t = await env.DB.prepare(`SELECT folder_id FROM transfers WHERE id=?`).bind(tid).first();
+  if (t && t.folder_id) {
+    await driveDelete(env, t.folder_id);   // deleting the folder removes all its files in one step
+  } else {
+    // older transfers without a folder: delete file by file (max 40 per request)
+    const { results: files } = await env.DB.prepare(`SELECT drive_id FROM files WHERE transfer_id=? AND drive_id IS NOT NULL LIMIT 40`).bind(tid).all();
+    for (const f of files) await driveDelete(env, f.drive_id);
   }
   await env.DB.batch([
     env.DB.prepare(`UPDATE transfers SET status=? WHERE id=?`).bind(newStatus, tid),
@@ -234,7 +238,7 @@ async function emailTransfer(env, origin, tid, recipients, note) {
   return results;
 }
 const cleanEmails = (list) => [...new Set((Array.isArray(list) ? list : String(list || '').split(/[\s,;]+/))
-  .map(e => String(e).trim().toLowerCase()).filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)))].slice(0, 50);
+  .map(e => String(e).trim().toLowerCase()).filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)))].slice(0, 40);
 
 // parse "bytes=0-12345" from a Drive 308 reply → next offset
 const committed = (r) => { const m = /bytes=0-(\d+)/.exec(r.headers.get('range') || ''); return m ? Number(m[1]) + 1 : 0; };
@@ -276,7 +280,7 @@ async function route(context, p, method) {
   if (a === 'cleanup') {
     if (!(await isAdmin(request, env)) && !(env.CLEANUP_KEY && safeEq(url.searchParams.get('key'), env.CLEANUP_KEY))) return fail('Forbidden', 403);
     let total = 0, n;
-    do { n = await cleanup(env, 15); total += n; } while (n === 15 && total < 150);
+    do { n = await cleanup(env, 10); total += n; } while (n === 10 && total < 30);
     return json({ ok: true, cleaned: total });
   }
 
@@ -348,12 +352,12 @@ async function route(context, p, method) {
   // ===== everything below needs admin =====
   if (!(await isAdmin(request, env))) return fail('Please log in', 401);
 
-  // create transfer + one Google Drive upload session per file
+  // create transfer: one Drive sub-folder; upload sessions are opened later, one per file (/api/upload/start)
   if (a === 'transfers' && !b && method === 'POST') {
     const body = await request.json();
     const files = Array.isArray(body.files) ? body.files : [];
     if (!files.length) return fail('Add at least one file');
-    if (files.length > 300) return fail('Maximum 300 files per transfer');
+    if (files.length > 1000) return fail('Maximum 1000 files per transfer');
     const total = files.reduce((s, f) => s + Math.max(0, Number(f.size) || 0), 0);
     const u = await usage(env);
     if (u.free !== null && total > u.free) {
@@ -366,37 +370,52 @@ async function route(context, p, method) {
     if (body.password) { passSalt = rid(12); passHash = await sha256(passSalt + '|' + body.password); }
     const title = String(body.title || '').trim().slice(0, 140) || (files.length === 1 ? files[0].name.split('/').pop() : `${files.length} files`);
     const drive = await getDrive(env);
+    const fr = await gfetch(env, '/drive/v3/files?fields=id', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: `${new Date(now).toISOString().slice(0, 10)} · ${title.replace(/[\/]/g, '-')} (${tid})`, mimeType: 'application/vnd.google-apps.folder', parents: [drive.folderId] }),
+    });
+    if (!fr.ok) return fail('Google Drive error: ' + (await fr.text()).slice(0, 200), 502);
+    const folderId = (await fr.json()).id;
     const stmts = [env.DB.prepare(
-      `INSERT INTO transfers (id,title,message,created_at,expires_at,status,pass_hash,pass_salt,total_size,file_count) VALUES (?,?,?,?,?,?,?,?,?,?)`
-    ).bind(tid, title, String(body.message || '').slice(0, 3000), now, expires, 'uploading', passHash, passSalt, total, files.length)];
+      `INSERT INTO transfers (id,title,message,created_at,expires_at,status,pass_hash,pass_salt,total_size,file_count,folder_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(tid, title, String(body.message || '').slice(0, 3000), now, expires, 'uploading', passHash, passSalt, total, files.length, folderId)];
     const out = [];
     for (const f of files) {
       const fid = rid(12);
       const name = safeName(f.name);
       const size = Math.max(0, Number(f.size) || 0);
       const type = String(f.type || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
-      const meta = { name: name.split('/').pop(), parents: [drive.folderId], description: `DropLink ${tid} · ${title}` };
-      let sessionUrl = null, driveId = null, done = 0;
-      if (size === 0) {
-        const r = await gfetch(env, '/drive/v3/files?fields=id', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...meta, mimeType: type }) });
-        if (!r.ok) return fail('Google Drive error: ' + (await r.text()).slice(0, 200), 502);
-        driveId = (await r.json()).id; done = 1;
-      } else {
-        const r = await gfetch(env, '/upload/drive/v3/files?uploadType=resumable&fields=id', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-type': type, 'x-upload-content-length': String(size) },
-          body: JSON.stringify(meta),
-        });
-        if (!r.ok) return fail('Google Drive refused the upload: ' + (await r.text()).slice(0, 200), 502);
-        sessionUrl = r.headers.get('location');
-        if (!sessionUrl) return fail('Google Drive did not return an upload session', 502);
-      }
-      stmts.push(env.DB.prepare(`INSERT INTO files (id,transfer_id,name,size,type,drive_id,session_url,done) VALUES (?,?,?,?,?,?,?,?)`)
-        .bind(fid, tid, name, size, type, driveId, sessionUrl, done));
-      out.push({ id: fid, name, size, done: !!done });
+      stmts.push(env.DB.prepare(`INSERT INTO files (id,transfer_id,name,size,type,done) VALUES (?,?,?,?,?,0)`).bind(fid, tid, name, size, type));
+      out.push({ id: fid, name, size, done: false });
     }
-    await env.DB.batch(stmts);
+    for (let i = 0; i < stmts.length; i += 100) await env.DB.batch(stmts.slice(i, i + 100));
     return json({ id: tid, files: out, link: `${origin}/d/${tid}` });
+  }
+
+  // open the Google Drive upload for one file (called by the browser just before uploading it)
+  if (a === 'upload' && b === 'start' && method === 'POST') {
+    const fid = url.searchParams.get('f');
+    const f = await env.DB.prepare(`SELECT f.*, t.status, t.folder_id, t.title FROM files f JOIN transfers t ON t.id=f.transfer_id WHERE f.id=?`).bind(fid).first();
+    if (!f || f.status !== 'uploading') return fail('Upload not found', 404);
+    if (f.done) return json({ done: true, next: f.size });
+    if (f.session_url) return json({ done: false, next: 0, resumed: true });
+    const meta = { name: f.name.split('/').pop(), parents: [f.folder_id], description: `DropLink ${f.transfer_id} · ${f.title}` };
+    if (f.size === 0) {
+      const r = await gfetch(env, '/drive/v3/files?fields=id', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...meta, mimeType: f.type }) });
+      if (!r.ok) return fail('Google Drive error: ' + (await r.text()).slice(0, 200), 502);
+      await env.DB.prepare(`UPDATE files SET done=1, drive_id=? WHERE id=?`).bind((await r.json()).id, fid).run();
+      return json({ done: true, next: 0 });
+    }
+    const r = await gfetch(env, '/upload/drive/v3/files?uploadType=resumable&fields=id', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-type': f.type, 'x-upload-content-length': String(f.size) },
+      body: JSON.stringify(meta),
+    });
+    if (!r.ok) return fail('Google Drive refused the upload: ' + (await r.text()).slice(0, 200), 502);
+    const sessionUrl = r.headers.get('location');
+    if (!sessionUrl) return fail('Google Drive did not return an upload session', 502);
+    await env.DB.prepare(`UPDATE files SET session_url=? WHERE id=?`).bind(sessionUrl, fid).run();
+    return json({ done: false, next: 0 });
   }
 
   // upload one chunk:  PUT /api/upload/chunk?f=<fileId>&o=<offset>   (body = bytes)
@@ -450,7 +469,7 @@ async function route(context, p, method) {
 
   // list (dashboard)
   if (a === 'transfers' && !b && method === 'GET') {
-    try { await cleanup(env, 8); } catch (e) {}
+    try { await cleanup(env, 5); } catch (e) {}
     const { results: transfers } = await env.DB.prepare(
       `SELECT id,title,message,created_at,expires_at,status,total_size,file_count,downloads,last_download_at,recipients,
               (pass_hash IS NOT NULL) AS locked

@@ -56,7 +56,7 @@ async function copyText(s) {
   toast('Link copied');
 }
 async function api(path, opts = {}) {
-  const o = { method: opts.method || 'GET', headers: {}, credentials: 'same-origin' };
+  const o = { method: opts.method || 'GET', headers: { ...(opts.headers || {}) }, credentials: 'same-origin' };
   if (opts.body !== undefined) { o.headers['content-type'] = 'application/json'; o.body = JSON.stringify(opts.body); }
   const r = await fetch('/api/' + path, o);
   let data; try { data = await r.json(); } catch (e) { data = {}; }

@@ -8,6 +8,7 @@
 //   SENDER_NAME      (optional)  name shown in emails, e.g. "Musfikur Rahman"
 //   STORAGE_LIMIT_GB (optional)  extra cap for DropLink files (default: whatever is free in Drive)
 //   CLEANUP_KEY      (optional)  lets a daily GitHub Action call /api/cleanup?key=...
+//   NOTIFY_EMAIL     (optional)  your email — get notified on downloads and on files received via Request links
 
 const DAY = 86400000;
 let schemaReady = false;
@@ -30,7 +31,19 @@ async function ensureSchema(env) {
     env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_files_transfer ON files(transfer_id)`),
     env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status, expires_at)`),
   ]);
-  try { await env.DB.prepare(`ALTER TABLE transfers ADD COLUMN folder_id TEXT`).run(); } catch (e) {}
+  const ver = await env.DB.prepare(`SELECT v FROM kv WHERE k='schema'`).first();
+  if (!ver || Number(ver.v) < 4) {
+    for (const col of ['folder_id TEXT', 'notify INTEGER DEFAULT 0', 'notified INTEGER DEFAULT 0', 'request_id TEXT', 'from_name TEXT', 'from_email TEXT', 'from_note TEXT']) {
+      try { await env.DB.prepare(`ALTER TABLE transfers ADD COLUMN ${col}`).run(); } catch (e) {}
+    }
+    await env.DB.batch([
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT, emails TEXT, created_at INTEGER)`),
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, title TEXT, message TEXT, created_at INTEGER, expires_at INTEGER,
+        keep_days INTEGER, max_bytes INTEGER, status TEXT, pass_hash TEXT, pass_salt TEXT, uploads INTEGER DEFAULT 0, recipients TEXT DEFAULT '[]')`),
+      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_transfers_request ON transfers(request_id)`),
+      env.DB.prepare(`INSERT OR REPLACE INTO kv (k, v, exp) VALUES ('schema', '4', 0)`),
+    ]);
+  }
   schemaReady = true;
 }
 
@@ -198,6 +211,93 @@ async function purge(env, tid, newStatus) {
   ]);
 }
 
+// ---------- shared transfer creation (used by you and by Request-files uploads) ----------
+async function createTransfer(env, { title, message, files, expires, password, notify = 0, extra = {} }) {
+  const now = Date.now();
+  files = Array.isArray(files) ? files : [];
+  if (!files.length) throw httpError('Add at least one file', 400);
+  if (files.length > 1000) throw httpError('Maximum 1000 files per transfer', 400);
+  const total = files.reduce((s, f) => s + Math.max(0, Number(f.size) || 0), 0);
+  const u = await usage(env);
+  if (u.free !== null && total > u.free) throw httpError(`Not enough free space: this upload is ${fmtSize(total)}, but only ${fmtSize(u.free)} is free in Google Drive.`, 413);
+  const tid = rid(10);
+  let passHash = null, passSalt = null;
+  if (password) { passSalt = rid(12); passHash = await sha256(passSalt + '|' + password); }
+  title = String(title || '').trim().slice(0, 160) || (files.length === 1 ? String(files[0].name).split('/').pop() : `${files.length} files`);
+  const drive = await getDrive(env);
+  const fr = await gfetch(env, '/drive/v3/files?fields=id', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: `${new Date(now).toISOString().slice(0, 10)} · ${title.replace(/[\\/]/g, '-')} (${tid})`, mimeType: 'application/vnd.google-apps.folder', parents: [drive.folderId] }),
+  });
+  if (!fr.ok) throw httpError('Google Drive error: ' + (await fr.text()).slice(0, 200), 502);
+  const folderId = (await fr.json()).id;
+  const stmts = [env.DB.prepare(
+    `INSERT INTO transfers (id,title,message,created_at,expires_at,status,pass_hash,pass_salt,total_size,file_count,folder_id,notify,request_id,from_name,from_email,from_note)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(tid, title, String(message || '').slice(0, 3000), now, expires, 'uploading', passHash, passSalt, total, files.length, folderId, notify ? 1 : 0,
+    extra.request_id || null, extra.from_name || null, extra.from_email || null, extra.from_note || null)];
+  const out = [];
+  for (const f of files) {
+    const fid = rid(12);
+    const name = safeName(f.name);
+    const size = Math.max(0, Number(f.size) || 0);
+    const type = String(f.type || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
+    stmts.push(env.DB.prepare(`INSERT INTO files (id,transfer_id,name,size,type,done) VALUES (?,?,?,?,?,0)`).bind(fid, tid, name, size, type));
+    out.push({ id: fid, name, size, done: false });
+  }
+  for (let i = 0; i < stmts.length; i += 100) await env.DB.batch(stmts.slice(i, i + 100));
+  return { id: tid, files: out };
+}
+function httpError(msg, status) { const e = new Error(msg); e.status = status; return e; }
+async function canUpload(request, env, tid) {
+  if (await isAdmin(request, env)) return true;
+  const tok = request.headers.get('x-up');
+  return !!tok && safeEq(tok, await hmac(secretOf(env), 'up.' + tid));
+}
+
+// ---------- notifications to you ----------
+function simpleEmail(heading, lines, button, link) {
+  return `<!doctype html><html><body style="margin:0;background:#f3f5fb;font-family:Segoe UI,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="padding:24px 12px"><tr><td align="center">
+<table width="520" cellpadding="0" cellspacing="0" style="max-width:520px;background:#fff;border-radius:14px;overflow:hidden">
+<tr><td style="background:#3b5bfd;padding:18px 24px;color:#fff;font-size:18px;font-weight:700">DropLink</td></tr>
+<tr><td style="padding:24px"><h2 style="margin:0 0 12px;font-size:20px;color:#111827">${heading}</h2>
+${lines.filter(Boolean).map(l => `<p style="margin:0 0 8px;font-size:14px;color:#374151">${l}</p>`).join('')}
+${link ? `<a href="${link}" style="display:inline-block;margin-top:12px;background:#3b5bfd;color:#fff;text-decoration:none;font-weight:600;padding:11px 22px;border-radius:9px">${button}</a>` : ''}
+</td></tr></table><p style="font-size:11px;color:#9ca3af">DropLink · Developed by Musfikur Rahman</p></td></tr></table></body></html>`;
+}
+async function notifyAdmin(env, subject, html) {
+  if (!env.NOTIFY_EMAIL || !env.SCRIPT_URL) return;
+  try { await callScript(env, { action: 'mail', to: env.NOTIFY_EMAIL, subject, html, name: 'DropLink' }); } catch (e) {}
+}
+async function notifyFirstDownload(env, origin, tid, fileName, request) {
+  const r = await env.DB.prepare(`UPDATE transfers SET notified=1 WHERE id=? AND notify=1 AND notified=0`).bind(tid).run();
+  if (!r.meta || !r.meta.changes) return;
+  const t = await env.DB.prepare(`SELECT title, file_count FROM transfers WHERE id=?`).bind(tid).first();
+  const cf = request.cf || {};
+  const where = [cf.city, cf.country].filter(Boolean).join(', ');
+  const when = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  await notifyAdmin(env, `⬇ Downloaded: ${t.title}`, simpleEmail('Your files were downloaded',
+    [`<b>${esc(t.title)}</b>`, fileName ? `First file: ${esc(fileName)}` : `Downloaded as ZIP (${t.file_count} files)`, `Time: ${when} (Dhaka)`, where ? `Location: ${esc(where)}` : ''],
+    'Open DropLink', `${origin}/#list`));
+}
+async function emailRequest(env, origin, id, recipients) {
+  const q = await env.DB.prepare(`SELECT * FROM requests WHERE id=?`).bind(id).first();
+  const sender = env.SENDER_NAME || 'DropLink';
+  const html = simpleEmail(`${esc(sender)} is requesting files from you`,
+    [`<b>${esc(q.title)}</b>`, q.message ? `<span style="white-space:pre-wrap">${esc(q.message)}</span>` : '',
+     `Please upload by <b>${fmtDate(q.expires_at)}</b>. No account needed.`, q.pass_hash ? 'The upload page is password protected — the password will be shared separately.' : ''],
+    'Upload files', `${origin}/r/${id}`);
+  const results = [];
+  for (const to of recipients) {
+    try { await callScript(env, { action: 'mail', to, subject: `${sender} requests files: ${q.title}`, html, name: sender }); results.push({ to, ok: true }); }
+    catch (e) { results.push({ to, ok: false, error: e.message }); }
+  }
+  const all = [...new Set([...JSON.parse(q.recipients || '[]'), ...results.filter(r => r.ok).map(r => r.to)])];
+  await env.DB.prepare(`UPDATE requests SET recipients=? WHERE id=?`).bind(JSON.stringify(all), id).run();
+  return results;
+}
+
 // ---------- email ----------
 function emailHtml({ sender, title, message, link, files, total, expires, hasPassword }) {
   const list = files.slice(0, 12).map(f =>
@@ -251,7 +351,7 @@ export async function onRequest(context) {
     await ensureSchema(env);
     return await route(context, (params.path || []), context.request.method);
   } catch (e) {
-    return fail(e.message || String(e), 500);
+    return fail(e.message || String(e), e.status || 500);
   }
 }
 
@@ -274,7 +374,7 @@ async function route(context, p, method) {
     return json({ ok: true }, 200, { 'set-cookie': `dl_s=${v}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${30 * 86400}` });
   }
   if (a === 'logout') return json({ ok: true }, 200, { 'set-cookie': `dl_s=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0` });
-  if (a === 'me') return json({ admin: await isAdmin(request, env), sender: env.SENDER_NAME || '', mail: !!env.SCRIPT_URL, storage: !!env.SCRIPT_URL });
+  if (a === 'me') return json({ admin: await isAdmin(request, env), sender: env.SENDER_NAME || '', mail: !!env.SCRIPT_URL, storage: !!env.SCRIPT_URL, notify: !!env.NOTIFY_EMAIL });
 
   // ----- cron cleanup -----
   if (a === 'cleanup') {
@@ -309,8 +409,10 @@ async function route(context, p, method) {
   }
   if (a === 'public' && b && c === 'zipped' && method === 'POST') {
     const t = await env.DB.prepare(`SELECT id FROM transfers WHERE id=? AND status='ready'`).bind(b).first();
-    if (t && !(await isAdmin(request, env)))
+    if (t && !(await isAdmin(request, env))) {
       await env.DB.prepare(`UPDATE transfers SET downloads=downloads+1, last_download_at=? WHERE id=?`).bind(now, b).run();
+      context.waitUntil(notifyFirstDownload(env, origin, b, null, request));
+    }
     return json({ ok: true });
   }
 
@@ -344,59 +446,17 @@ async function route(context, p, method) {
       context.waitUntil(env.DB.batch([
         env.DB.prepare(`UPDATE files SET downloads=downloads+1 WHERE id=?`).bind(c),
         env.DB.prepare(`UPDATE transfers SET downloads=downloads+1, last_download_at=? WHERE id=?`).bind(now, b),
-      ]));
+      ]).then(() => notifyFirstDownload(env, origin, b, row.name, request)));
     }
     return new Response(g.body, { status: g.status, headers: h });
   }
 
-  // ===== everything below needs admin =====
-  if (!(await isAdmin(request, env))) return fail('Please log in', 401);
-
-  // create transfer: one Drive sub-folder; upload sessions are opened later, one per file (/api/upload/start)
-  if (a === 'transfers' && !b && method === 'POST') {
-    const body = await request.json();
-    const files = Array.isArray(body.files) ? body.files : [];
-    if (!files.length) return fail('Add at least one file');
-    if (files.length > 1000) return fail('Maximum 1000 files per transfer');
-    const total = files.reduce((s, f) => s + Math.max(0, Number(f.size) || 0), 0);
-    const u = await usage(env);
-    if (u.free !== null && total > u.free) {
-      return fail(`Not enough free space: this transfer is ${fmtSize(total)}, but only ${fmtSize(u.free)} is free in your Google Drive. Delete old transfers first.`, 413);
-    }
-    let expires = Number(body.expiresAt) || now + (Number(body.days) || 7) * DAY;
-    expires = Math.min(Math.max(expires, now + 3600000), now + 365 * DAY);
-    const tid = rid(10);
-    let passHash = null, passSalt = null;
-    if (body.password) { passSalt = rid(12); passHash = await sha256(passSalt + '|' + body.password); }
-    const title = String(body.title || '').trim().slice(0, 140) || (files.length === 1 ? files[0].name.split('/').pop() : `${files.length} files`);
-    const drive = await getDrive(env);
-    const fr = await gfetch(env, '/drive/v3/files?fields=id', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: `${new Date(now).toISOString().slice(0, 10)} · ${title.replace(/[\/]/g, '-')} (${tid})`, mimeType: 'application/vnd.google-apps.folder', parents: [drive.folderId] }),
-    });
-    if (!fr.ok) return fail('Google Drive error: ' + (await fr.text()).slice(0, 200), 502);
-    const folderId = (await fr.json()).id;
-    const stmts = [env.DB.prepare(
-      `INSERT INTO transfers (id,title,message,created_at,expires_at,status,pass_hash,pass_salt,total_size,file_count,folder_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
-    ).bind(tid, title, String(body.message || '').slice(0, 3000), now, expires, 'uploading', passHash, passSalt, total, files.length, folderId)];
-    const out = [];
-    for (const f of files) {
-      const fid = rid(12);
-      const name = safeName(f.name);
-      const size = Math.max(0, Number(f.size) || 0);
-      const type = String(f.type || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
-      stmts.push(env.DB.prepare(`INSERT INTO files (id,transfer_id,name,size,type,done) VALUES (?,?,?,?,?,0)`).bind(fid, tid, name, size, type));
-      out.push({ id: fid, name, size, done: false });
-    }
-    for (let i = 0; i < stmts.length; i += 100) await env.DB.batch(stmts.slice(i, i + 100));
-    return json({ id: tid, files: out, link: `${origin}/d/${tid}` });
-  }
-
-  // open the Google Drive upload for one file (called by the browser just before uploading it)
+  // ===== uploads (you, or a factory using your "Request files" link) =====
   if (a === 'upload' && b === 'start' && method === 'POST') {
     const fid = url.searchParams.get('f');
     const f = await env.DB.prepare(`SELECT f.*, t.status, t.folder_id, t.title FROM files f JOIN transfers t ON t.id=f.transfer_id WHERE f.id=?`).bind(fid).first();
     if (!f || f.status !== 'uploading') return fail('Upload not found', 404);
+    if (!(await canUpload(request, env, f.transfer_id))) return fail('Not allowed', 403);
     if (f.done) return json({ done: true, next: f.size });
     if (f.session_url) return json({ done: false, next: 0, resumed: true });
     const meta = { name: f.name.split('/').pop(), parents: [f.folder_id], description: `DropLink ${f.transfer_id} · ${f.title}` };
@@ -417,35 +477,32 @@ async function route(context, p, method) {
     await env.DB.prepare(`UPDATE files SET session_url=? WHERE id=?`).bind(sessionUrl, fid).run();
     return json({ done: false, next: 0 });
   }
-
-  // upload one chunk:  PUT /api/upload/chunk?f=<fileId>&o=<offset>   (body = bytes)
   if (a === 'upload' && b === 'chunk' && method === 'PUT') {
     const fid = url.searchParams.get('f'), off = Number(url.searchParams.get('o'));
-    const f = await env.DB.prepare(`SELECT f.size, f.session_url, f.done, t.status FROM files f JOIN transfers t ON t.id=f.transfer_id WHERE f.id=?`).bind(fid).first();
+    const f = await env.DB.prepare(`SELECT f.transfer_id, f.size, f.session_url, f.done, t.status FROM files f JOIN transfers t ON t.id=f.transfer_id WHERE f.id=?`).bind(fid).first();
     if (!f || f.status !== 'uploading' || !f.session_url) return fail('Upload not found', 404);
+    if (!(await canUpload(request, env, f.transfer_id))) return fail('Not allowed', 403);
     if (f.done) return json({ done: true, next: f.size });
     const buf = await request.arrayBuffer();
     if (!(off >= 0) || off + buf.byteLength > f.size || !buf.byteLength) return fail('Bad chunk range');
     const end = off + buf.byteLength - 1;
-    const r = await fetch(f.session_url, {
-      method: 'PUT', redirect: 'manual', body: buf,
-      headers: { 'content-range': `bytes ${off}-${end}/${f.size}` },
-    });
+    const r = await fetch(f.session_url, { method: 'PUT', redirect: 'manual', body: buf, headers: { 'content-range': `bytes ${off}-${end}/${f.size}` } });
     if (r.status === 308) return json({ done: false, next: committed(r) });
     if (r.status === 200 || r.status === 201) {
       const meta = await r.json().catch(() => ({}));
       await env.DB.prepare(`UPDATE files SET done=1, drive_id=?, session_url=NULL WHERE id=?`).bind(meta.id || null, fid).run();
       return json({ done: true, next: f.size });
     }
-    if (r.status === 404 || r.status === 410) return fail('Upload session expired — please start this transfer again', 410);
+    if (r.status === 404 || r.status === 410) return fail('Upload session expired — please start again', 410);
     return fail('Google Drive error ' + r.status + ': ' + (await r.text()).slice(0, 200), 502);
   }
-  // ask Drive how many bytes it really has (used after a network error)
   if (a === 'upload' && b === 'status' && method === 'GET') {
     const fid = url.searchParams.get('f');
-    const f = await env.DB.prepare(`SELECT size, session_url, done FROM files WHERE id=?`).bind(fid).first();
+    const f = await env.DB.prepare(`SELECT transfer_id, size, session_url, done FROM files WHERE id=?`).bind(fid).first();
     if (!f) return fail('Upload not found', 404);
+    if (!(await canUpload(request, env, f.transfer_id))) return fail('Not allowed', 403);
     if (f.done) return json({ done: true, next: f.size });
+    if (!f.session_url) return json({ done: false, next: 0 });
     const r = await fetch(f.session_url, { method: 'PUT', redirect: 'manual', headers: { 'content-range': `bytes */${f.size}` } });
     if (r.status === 308) return json({ done: false, next: committed(r) });
     if (r.status === 200 || r.status === 201) {
@@ -453,7 +510,71 @@ async function route(context, p, method) {
       await env.DB.prepare(`UPDATE files SET done=1, drive_id=?, session_url=NULL WHERE id=?`).bind(meta.id || null, fid).run();
       return json({ done: true, next: f.size });
     }
-    return fail('Upload session expired — please start this transfer again', 410);
+    return fail('Upload session expired — please start again', 410);
+  }
+
+  // ===== public "Request files" page =====
+  if (a === 'rq' && b && !c && method === 'GET') {
+    const q = await env.DB.prepare(`SELECT * FROM requests WHERE id=?`).bind(b).first();
+    if (!q || q.status === 'deleted') return fail('This upload link does not exist.', 404);
+    if (q.status === 'closed' || q.expires_at < now) return json({ closed: true, title: q.title, sender: env.SENDER_NAME || '' }, 410);
+    return json({ id: q.id, title: q.title, message: q.message, expires_at: q.expires_at, max_bytes: q.max_bytes,
+      sender: env.SENDER_NAME || '', locked: !!q.pass_hash });
+  }
+  if (a === 'rq' && b && c === 'unlock' && method === 'POST') {
+    const q = await env.DB.prepare(`SELECT id, pass_hash, pass_salt FROM requests WHERE id=? AND status='open'`).bind(b).first();
+    if (!q) return fail('Not found', 404);
+    const { password } = await request.json().catch(() => ({}));
+    if (!q.pass_hash || safeEq(await sha256(q.pass_salt + '|' + password), q.pass_hash)) return json({ token: await unlockToken(env, 'rq.' + q.id, now + DAY) });
+    await new Promise(r => setTimeout(r, 700));
+    return fail('Wrong password', 401);
+  }
+  if (a === 'rq' && b && c === 'transfers' && method === 'POST') {
+    const q = await env.DB.prepare(`SELECT * FROM requests WHERE id=?`).bind(b).first();
+    if (!q || q.status !== 'open' || q.expires_at < now) return fail('This upload link is closed.', 410);
+    const body = await request.json();
+    if (q.pass_hash && !(await validUnlock(env, 'rq.' + q.id, body.k))) return fail('Password required', 401);
+    const name = String(body.name || '').trim().slice(0, 80);
+    if (!name) return fail('Please enter your name');
+    const files = Array.isArray(body.files) ? body.files : [];
+    const total = files.reduce((s, f) => s + Math.max(0, Number(f.size) || 0), 0);
+    if (total > q.max_bytes) return fail(`Too large: maximum ${fmtSize(q.max_bytes)} per upload on this link.`, 413);
+    const fromEmail = cleanEmails([body.email])[0] || null;
+    const t = await createTransfer(env, {
+      title: `${q.title} — from ${name}`, message: String(body.note || ''), files,
+      expires: now + (q.keep_days || 30) * DAY, notify: 0,
+      extra: { request_id: q.id, from_name: name, from_email: fromEmail, from_note: String(body.note || '').slice(0, 2000) },
+    });
+    return json({ id: t.id, files: t.files, up: await hmac(secretOf(env), 'up.' + t.id) });
+  }
+  if (a === 'rq' && b && c === 'finalize' && method === 'POST') {
+    const { tid } = await request.json().catch(() => ({}));
+    const t = await env.DB.prepare(`SELECT * FROM transfers WHERE id=? AND request_id=?`).bind(tid, b).first();
+    if (!t || !(await canUpload(request, env, tid))) return fail('Not allowed', 403);
+    const pending = await env.DB.prepare(`SELECT COUNT(*) AS n FROM files WHERE transfer_id=? AND (done=0 OR drive_id IS NULL)`).bind(tid).first();
+    if (pending.n > 0) return fail(`${pending.n} file(s) did not finish uploading`);
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE transfers SET status='ready' WHERE id=? AND status='uploading'`).bind(tid),
+      env.DB.prepare(`UPDATE requests SET uploads=uploads+1 WHERE id=?`).bind(b),
+    ]);
+    context.waitUntil(notifyAdmin(env, `📥 ${t.from_name} uploaded ${t.file_count} file${t.file_count > 1 ? 's' : ''}: ${t.title}`, simpleEmail(
+      `${t.from_name} sent you files`,
+      [`<b>${esc(t.title)}</b>`, `${t.file_count} file(s) · ${fmtSize(t.total_size)}`, t.from_email ? `Email: ${esc(t.from_email)}` : '', t.from_note ? `Note: ${esc(t.from_note)}` : ''],
+      'Open files', `${origin}/d/${tid}`)));
+    return json({ ok: true });
+  }
+
+  // ===== everything below needs admin =====
+  if (!(await isAdmin(request, env))) return fail('Please log in', 401);
+
+  // create transfer: one Drive sub-folder; upload sessions are opened later, one per file (/api/upload/start)
+  if (a === 'transfers' && !b && method === 'POST') {
+    const body = await request.json();
+    let expires = Number(body.expiresAt) || now + (Number(body.days) || 7) * DAY;
+    expires = Math.min(Math.max(expires, now + 3600000), now + 365 * DAY);
+    const t = await createTransfer(env, { title: body.title, message: body.message, files: body.files, expires, password: body.password,
+      notify: body.notify && env.NOTIFY_EMAIL ? 1 : 0 });
+    return json({ id: t.id, files: t.files, link: `${origin}/d/${t.id}` });
   }
 
   // finalize + optional email
@@ -472,7 +593,7 @@ async function route(context, p, method) {
     try { await cleanup(env, 5); } catch (e) {}
     const { results: transfers } = await env.DB.prepare(
       `SELECT id,title,message,created_at,expires_at,status,total_size,file_count,downloads,last_download_at,recipients,
-              (pass_hash IS NOT NULL) AS locked
+              (pass_hash IS NOT NULL) AS locked, notify, request_id, from_name, from_email, from_note
        FROM transfers WHERE status IN ('ready','expired') AND created_at > ? ORDER BY created_at DESC LIMIT 300`
     ).bind(now - 120 * DAY).all();
     const { results: files } = await env.DB.prepare(
@@ -494,16 +615,81 @@ async function route(context, p, method) {
     await env.DB.prepare(`UPDATE transfers SET expires_at=? WHERE id=?`).bind(exp, b).run();
     return json({ ok: true, expires_at: exp });
   }
-
   if (a === 'transfers' && b && c === 'email' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
     const recipients = cleanEmails(body.recipients);
     if (!recipients.length) return fail('Enter at least one valid email');
     return json({ ok: true, emailed: await emailTransfer(env, origin, b, recipients, body.message) });
   }
-
+  if (a === 'transfers' && b && c === 'notify' && method === 'POST') {
+    const { on } = await request.json().catch(() => ({}));
+    await env.DB.prepare(`UPDATE transfers SET notify=?, notified=0 WHERE id=?`).bind(on ? 1 : 0, b).run();
+    return json({ ok: true });
+  }
   if (a === 'transfers' && b && !c && method === 'DELETE') {
     await purge(env, b, 'deleted');
+    return json({ ok: true });
+  }
+
+  // ----- contact groups -----
+  if (a === 'groups' && !b && method === 'GET') {
+    const { results } = await env.DB.prepare(`SELECT id, name, emails FROM groups ORDER BY name COLLATE NOCASE`).all();
+    return json({ groups: results.map(g => ({ ...g, emails: JSON.parse(g.emails || '[]') })) });
+  }
+  if (a === 'groups' && !b && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const name = String(body.name || '').trim().slice(0, 60);
+    const emails = cleanEmails(body.emails);
+    if (!name) return fail('Enter a group name');
+    if (!emails.length) return fail('Add at least one valid email');
+    const id = body.id || rid(8);
+    await env.DB.prepare(`INSERT OR REPLACE INTO groups (id, name, emails, created_at) VALUES (?,?,?,?)`).bind(id, name, JSON.stringify(emails), now).run();
+    return json({ ok: true, id });
+  }
+  if (a === 'groups' && b && method === 'DELETE') {
+    await env.DB.prepare(`DELETE FROM groups WHERE id=?`).bind(b).run();
+    return json({ ok: true });
+  }
+
+  // ----- file requests (factories upload to you) -----
+  if (a === 'requests' && !b && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const title = String(body.title || '').trim().slice(0, 140);
+    if (!title) return fail('Enter a title, e.g. "Lab test reports for PO 30727"');
+    const id = rid(9);
+    let passHash = null, passSalt = null;
+    if (body.password) { passSalt = rid(12); passHash = await sha256(passSalt + '|' + body.password); }
+    const days = Math.min(Math.max(Number(body.days) || 14, 1), 365);
+    const keep = Math.min(Math.max(Number(body.keepDays) || 30, 1), 365);
+    const maxB = Math.min(Math.max(Number(body.maxGb) || 2, 0.1), 10) * 1024 ** 3;
+    await env.DB.prepare(`INSERT INTO requests (id,title,message,created_at,expires_at,keep_days,max_bytes,status,pass_hash,pass_salt) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+      .bind(id, title, String(body.message || '').slice(0, 3000), now, now + days * DAY, keep, Math.round(maxB), 'open', passHash, passSalt).run();
+    const recipients = cleanEmails(body.recipients);
+    const emailed = recipients.length ? await emailRequest(env, origin, id, recipients) : [];
+    return json({ ok: true, id, link: `${origin}/r/${id}`, emailed });
+  }
+  if (a === 'requests' && !b && method === 'GET') {
+    const { results } = await env.DB.prepare(
+      `SELECT r.id,r.title,r.message,r.created_at,r.expires_at,r.keep_days,r.max_bytes,r.status,r.uploads,r.recipients,(r.pass_hash IS NOT NULL) AS locked,
+         (SELECT COUNT(*) FROM transfers t WHERE t.request_id=r.id AND t.status='ready') AS received
+       FROM requests r WHERE r.status IN ('open','closed') ORDER BY r.created_at DESC LIMIT 200`).all();
+    for (const r of results) { r.link = `${origin}/r/${r.id}`; r.recipients = JSON.parse(r.recipients || '[]'); }
+    return json({ requests: results });
+  }
+  if (a === 'requests' && b && c === 'close' && method === 'POST') {
+    const { open } = await request.json().catch(() => ({}));
+    if (open) await env.DB.prepare(`UPDATE requests SET status='open', expires_at=MAX(expires_at, ?) WHERE id=?`).bind(now + 7 * DAY, b).run();
+    else await env.DB.prepare(`UPDATE requests SET status='closed' WHERE id=?`).bind(b).run();
+    return json({ ok: true });
+  }
+  if (a === 'requests' && b && c === 'email' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const recipients = cleanEmails(body.recipients);
+    if (!recipients.length) return fail('Enter at least one valid email');
+    return json({ ok: true, emailed: await emailRequest(env, origin, b, recipients) });
+  }
+  if (a === 'requests' && b && !c && method === 'DELETE') {
+    await env.DB.prepare(`UPDATE requests SET status='deleted' WHERE id=?`).bind(b).run();
     return json({ ok: true });
   }
 

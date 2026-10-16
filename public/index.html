@@ -54,6 +54,11 @@
   .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:18px}
   .toolbar .in{max-width:340px}
   .empty{text-align:center;padding:50px 16px;color:var(--mute)}
+  .grpRow{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:13px}
+  .grpRow .g{border:1px dashed #c9d1ea;background:#fbfcff;border-radius:99px;padding:3px 11px;cursor:pointer;font-weight:600;color:var(--ink2);font-size:12.5px}
+  .grpRow .g:hover{border-color:var(--pri);color:var(--pri)}
+  .grpRow .lnk{background:none;border:0;color:var(--pri);cursor:pointer;font-size:12.5px;padding:3px 4px}
+  .pill.in{background:#fff4e0;color:#a35f00}
   @media (max-width:820px){.grid{grid-template-columns:1fr}}
 </style>
 </head>
@@ -65,6 +70,7 @@
     <nav class="tabs hide" id="tabs">
       <button data-tab="send" class="on">Send</button>
       <button data-tab="list">My transfers</button>
+      <button data-tab="req">Requests</button>
     </nav>
     <button class="btn ghost sm hide" id="logoutBtn" title="Log out">Log out</button>
   </div>
@@ -116,6 +122,7 @@
           <label class="f">Email to <span class="muted" style="font-weight:400">(optional — or just copy the link)</span></label>
           <div class="chips" id="chips"><input id="emailIn" list="contacts" placeholder="name@factory.com, press Enter" autocomplete="off"></div>
           <datalist id="contacts"></datalist>
+          <div class="grpRow" data-target="chips"></div>
           <div id="mailWarn" class="small hide" style="color:var(--warn);margin-top:6px">Google Apps Script isn't connected yet — see setup guide step 4.</div>
         </div>
 
@@ -137,6 +144,9 @@
           <input type="date" class="in mt hide" id="expDate">
         </div>
 
+        <div class="mt" id="notifyWrap">
+          <label class="toggle"><input type="checkbox" id="notifyOn" checked> Email me when someone downloads</label>
+        </div>
         <div class="mt">
           <label class="toggle"><input type="checkbox" id="pwOn"> Protect with password</label>
           <input class="in mt hide" id="tpw" type="text" placeholder="Password for receivers" autocomplete="off">
@@ -196,6 +206,45 @@
     <div class="tlist" id="tlist"></div>
   </section>
 
+  <!-- REQUESTS -->
+  <section id="vReq" class="hide">
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin:0 0 4px">Request files</h3>
+        <p class="muted small" style="margin:0 0 14px">Create a link — factories open it and upload files straight to your Google Drive. No account needed.</p>
+        <label class="f" for="rqTitle">What do you need?</label>
+        <input class="in" id="rqTitle" maxlength="140" placeholder="e.g. Lab test reports – PO 30727">
+        <label class="f mt" for="rqMsg">Message</label>
+        <textarea class="in" id="rqMsg" maxlength="3000" placeholder="Please upload the FRI report, test reports and photos."></textarea>
+        <div class="mt">
+          <label class="f">Email the link to <span class="muted" style="font-weight:400">(optional)</span></label>
+          <textarea class="in" id="rqTo" style="min-height:52px" placeholder="qa@factory.com, merch@factory.com"></textarea>
+          <div class="grpRow" data-target="rqTo"></div>
+        </div>
+        <div class="row mt">
+          <div><label class="f" for="rqDays">Link open for</label>
+            <select class="in" id="rqDays"><option value="3">3 days</option><option value="7">7 days</option><option value="14" selected>14 days</option><option value="30">30 days</option><option value="90">90 days</option></select></div>
+          <div><label class="f" for="rqKeep">Keep received files</label>
+            <select class="in" id="rqKeep"><option value="7">7 days</option><option value="14">14 days</option><option value="30" selected>30 days</option><option value="60">60 days</option><option value="90">90 days</option></select></div>
+          <div><label class="f" for="rqMax">Max per upload</label>
+            <select class="in" id="rqMax"><option value="0.5">500 MB</option><option value="1">1 GB</option><option value="2" selected>2 GB</option><option value="5">5 GB</option></select></div>
+        </div>
+        <div class="mt"><label class="toggle"><input type="checkbox" id="rqPwOn"> Protect with password</label>
+          <input class="in mt hide" id="rqPw" type="text" placeholder="Password for the upload page" autocomplete="off"></div>
+        <button class="btn pri big mt" style="width:100%" id="rqCreate">Create upload link</button>
+        <div id="rqDone" class="hide mt" style="text-align:center">
+          <div class="linkbox"><input class="in" id="rqLink" readonly><button class="btn pri" id="rqCopy">Copy</button></div>
+          <div class="share"><a class="btn sm" id="rqWa" target="_blank" rel="noopener">WhatsApp</a><button class="btn sm" id="rqQrBtn">QR code</button></div>
+          <div class="qr hide" id="rqQr"></div>
+          <div id="rqMail" class="small mt"></div>
+        </div>
+      </div>
+      <div>
+        <div class="tlist" id="rqList" style="margin-top:0"></div>
+      </div>
+    </div>
+  </section>
+
 </div>
 </main>
 
@@ -203,9 +252,8 @@
 
 <script src="/vendor/qrcode.js"></script>
 <script src="/common.js"></script>
+<script src="/uploader.js"></script>
 <script>
-const PART = 16 * 1024 * 1024;   // 16 MB chunks (multiple of 256 KB, as Google Drive requires)
-const PARALLEL = 4;              // files uploaded at the same time
 let ME = {}; let picked = []; let days = 7; let LIST = null; let filter = 'active';
 let currentUpload = null;
 
@@ -215,13 +263,15 @@ let currentUpload = null;
   if (!ME.admin) return show('login');
   $('#tabs').classList.remove('hide'); $('#logoutBtn').classList.remove('hide');
   $('#mailWarn').classList.toggle('hide', !!ME.mail);
-  show(location.hash === '#list' ? 'list' : 'send');
-  loadContacts(); refreshSpace();
+  show(location.hash === '#list' ? 'list' : location.hash === '#req' ? 'req' : 'send');
+  loadContacts(); refreshSpace(); loadGroups();
+  if (!ME.notify) { $('#notifyOn').checked = false; $('#notifyWrap').innerHTML = '<span class="small muted">Tip: add NOTIFY_EMAIL in Cloudflare settings to get an email when files are downloaded.</span>'; }
 })();
 function show(v) {
-  ['login', 'send', 'list'].forEach(x => $('#v' + x[0].toUpperCase() + x.slice(1)).classList.toggle('hide', x !== v));
+  ['vLogin', 'vSend', 'vList', 'vReq'].forEach(id => $('#' + id).classList.toggle('hide', id !== { login: 'vLogin', send: 'vSend', list: 'vList', req: 'vReq' }[v]));
   $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === v));
   if (v === 'list') { history.replaceState(null, '', '#list'); loadList(); }
+  if (v === 'req') { history.replaceState(null, '', '#req'); loadReqs(); }
   if (v === 'send') history.replaceState(null, '', location.pathname);
 }
 $$('#tabs button').forEach(b => b.onclick = () => show(b.dataset.tab));
@@ -353,6 +403,7 @@ async function startUpload() {
     const v = $('#expDate').value; if (!v) return toast('Pick an expiry date');
     body.expiresAt = new Date(v + 'T23:59:00').getTime();
   } else body.days = Number(days);
+  body.notify = !!($('#notifyOn') && $('#notifyOn').checked);
 
   $('#sendBtn').disabled = true;
   // show progress screen immediately
@@ -369,95 +420,7 @@ async function startUpload() {
   const state = { t, cancelled: false, xhrs: new Set() };
   currentUpload = state;
   const items = t.files.map((f, i) => ({ ...f, file: picked[i].file, loaded: f.done ? f.size : 0 }));
-  $('#pFiles').innerHTML = items.map((f, i) => `<li>${fileIcon(f.name)}<div class="fname"><b>${esc(f.name)}</b>
-     <div class="bar ${f.done ? 'ok' : ''}" style="margin-top:6px"><i id="fb${i}" style="width:${f.done ? 100 : 0}%"></i></div></div>
-     <span class="small muted" id="fs${i}" style="min-width:70px;text-align:right">${f.done ? 'Done' : fmtSize(f.size)}</span></li>`).join('');
-
-  // Upload engine: each file goes up in order (Google Drive needs that), several files at once
-  const total = items.reduce((s, f) => s + f.size, 0) || 1;
-  const inflight = new Map();   // fileIndex -> bytes sent in current chunk
-  const t0 = Date.now(); let lastB = 0, lastT = t0, speed = 0;
-  const sentNow = () => items.reduce((s, f) => s + f.loaded, 0) + [...inflight.values()].reduce((s, v) => s + v, 0);
-  lastB = sentNow();
-  const tick = setInterval(() => {
-    const now = Date.now(), cur = sentNow();
-    const inst = (cur - lastB) / ((now - lastT) / 1000 || 1);
-    speed = speed ? speed * 0.7 + inst * 0.3 : inst; lastB = cur; lastT = now;
-    const pct = Math.min(100, (cur / total) * 100);
-    $('#pPct').textContent = Math.floor(pct) + '%'; $('#pBar').style.width = pct + '%';
-    const eta = speed > 0 ? (total - cur) / speed : 0;
-    const nDone = items.filter(x => x.done).length;
-    if (!state.retrying) $('#pInfo').textContent = `${nDone} of ${items.length} files done · ${fmtSize(cur)} of ${fmtSize(total)} · ${fmtSize(Math.max(0, speed))}/s` + (eta > 1 ? ` · ${eta > 90 ? Math.ceil(eta / 60) + ' min' : Math.ceil(eta) + ' sec'} left` : '');
-    items.forEach((f, i) => {
-      if (f.done) return;
-      const el = $('#fb' + i); if (el) el.style.width = ((f.loaded + (inflight.get(i) || 0)) / f.size * 100) + '%';
-    });
-  }, 500);
-
-  function putChunk(i, off, blob) {
-    return new Promise((resolve, reject) => {
-      const f = items[i];
-      const xhr = new XMLHttpRequest(); state.xhrs.add(xhr);
-      xhr.open('PUT', `/api/upload/chunk?f=${f.id}&o=${off}`);
-      xhr.upload.onprogress = (e) => inflight.set(i, e.loaded);
-      const end = () => { state.xhrs.delete(xhr); inflight.delete(i); };
-      xhr.onload = () => {
-        end();
-        let d = {}; try { d = JSON.parse(xhr.responseText); } catch (e) {}
-        if (xhr.status === 200) resolve(d);
-        else { const err = new Error(d.error || 'HTTP ' + xhr.status); err.fatal = xhr.status === 410 || xhr.status === 404 || xhr.status === 400; reject(err); }
-      };
-      xhr.onerror = () => { end(); reject(new Error('Network error')); };
-      xhr.onabort = () => { end(); const e = new Error('cancelled'); e.fatal = true; reject(e); };
-      xhr.send(blob);
-    });
-  }
-  async function uploadFile(i) {
-    const f = items[i];
-    $('#fs' + i).textContent = 'Starting…';
-    let off = 0, tries = 0, resumed = false;
-    for (;;) {   // open the Google Drive upload for this file
-      try { const st = await api('upload/start?f=' + f.id, { method: 'POST', body: {} }); if (st.done) { finishFile(i); return; } resumed = !!st.resumed; break; }
-      catch (err) {
-        if (state.cancelled || err.status === 404 || ++tries > 5) throw err;
-        await new Promise(r => setTimeout(r, 1500 * tries));
-      }
-    }
-    tries = 0;
-    if (resumed) { try { const s0 = await api('upload/status?f=' + f.id); off = s0.next || 0; if (s0.done) { finishFile(i); return; } } catch (e) {} }
-    $('#fs' + i).textContent = fmtSize(f.size);
-    while (!state.cancelled) {
-      try {
-        const r = await putChunk(i, off, f.file.slice(off, Math.min(f.size, off + PART)));
-        tries = 0; state.retrying = false;
-        off = r.next; f.loaded = Math.min(off, f.size);
-        if (r.done) break;
-      } catch (err) {
-        if (err.fatal || state.cancelled || ++tries > 6) throw err;
-        state.retrying = true;
-        $('#pInfo').textContent = `Connection issue — retrying (${tries}/6)…`;
-        await new Promise(r => setTimeout(r, 1500 * tries * tries));
-        try { const s = await api('upload/status?f=' + f.id); off = s.next; f.loaded = off; if (s.done) break; } catch (e) {}
-      }
-    }
-    if (state.cancelled) return;
-    finishFile(i);
-  }
-  function finishFile(i) {
-    const f = items[i]; f.done = true; f.loaded = f.size;
-    const el = $('#fb' + i); el.style.width = '100%'; el.parentNode.classList.add('ok'); $('#fs' + i).textContent = 'Done';
-  }
-
-  const queue = items.map((f, i) => i).filter(i => !items[i].done).sort((x, y) => items[y].size - items[x].size);
-  let failed = null;
-  async function worker() {
-    while (queue.length && !failed && !state.cancelled) {
-      const i = queue.shift();
-      try { await uploadFile(i); } catch (e) { failed = failed || e; }
-    }
-  }
-  await Promise.all(Array.from({ length: PARALLEL }, worker));
-  clearInterval(tick);
+  const { failed, total } = await runUpload(items, state);
 
   if (state.cancelled) return;
   if (failed) {
@@ -570,6 +533,8 @@ function renderList() {
           <div class="t-pills">
             ${active ? `<span class="pill ${soon ? 'warn' : 'ok'}">${timeLeft(t.expires_at)}</span>` : `<span class="pill bad">Expired ${fmtDate(t.expires_at)}</span>`}
             <span class="pill pri">⬇ ${t.downloads} download${t.downloads !== 1 ? 's' : ''}${t.last_download_at ? ' · last ' + ago(t.last_download_at) : ''}</span>
+            ${t.request_id ? `<span class="pill in" title="${esc((t.from_email || '') + (t.from_note ? ' · ' + t.from_note : ''))}">📥 Received from ${esc(t.from_name)}</span>` : ''}
+            ${t.notify ? '<span class="pill" title="You get an email on the first download">🔔 Notify</span>' : ''}
             ${t.locked ? '<span class="pill">🔒 Password</span>' : ''}
             ${t.recipients.length ? `<span class="pill" title="${esc(t.recipients.join(', '))}">✉ ${t.recipients.length} recipient${t.recipients.length > 1 ? 's' : ''}</span>` : ''}
           </div>
@@ -604,7 +569,7 @@ function act(a, id, btn) {
       await api(`transfers/${id}/extend`, { method: 'POST', body: { days: d } }); toast('Extended by ' + d + ' days'); loadList();
     } }], (m) => $$('#xSeg button', m).forEach(b => b.onclick = () => $$('#xSeg button', m).forEach(x => x.classList.toggle('on', x === b))));
   if (a === 'email') return modal(`<h3>Email this transfer</h3>
-      <label class="f">To (separate with commas)</label><textarea class="in" id="mTo" style="min-height:64px" placeholder="a@factory.com, b@factory.com"></textarea>
+      <label class="f">To (separate with commas)</label><textarea class="in" id="mTo" style="min-height:64px" placeholder="a@factory.com, b@factory.com"></textarea><div class="grpRow" data-target="mTo"></div>
       <label class="f mt">Message</label><textarea class="in" id="mMsg">${esc(t.message)}</textarea>
       ${t.recipients.length ? `<p class="small muted">Already sent to: ${esc(t.recipients.join(', '))}</p>` : ''}`,
     [{ t: 'Cancel' }, { t: 'Send email', pri: 1, fn: async (m) => {
@@ -613,7 +578,7 @@ function act(a, id, btn) {
       const ok = r.emailed.filter(x => x.ok); const bad = r.emailed.filter(x => !x.ok);
       saveContacts(ok.map(x => x.to));
       toast(bad.length ? `Sent ${ok.length}, failed ${bad.length}: ${bad[0].error}` : `Email sent to ${ok.length} recipient${ok.length > 1 ? 's' : ''}`, 4500); loadList();
-    } }]);
+    } }], () => renderGroupRows());
   if (a === 'del') return modal(`<h3>Delete transfer?</h3><p class="muted">“${esc(t.title)}” and its ${t.file_count} file(s) will be removed now. The link will stop working.</p>`,
     [{ t: 'Cancel' }, { t: 'Delete', pri: 1, danger: 1, fn: async () => { await api('transfers/' + id, { method: 'DELETE' }); toast('Deleted'); SPACE = null; loadList(); } }]);
 }
@@ -634,6 +599,121 @@ function modal(html, buttons, init) {
   bg.onclick = (e) => { if (e.target === bg) bg.remove(); };
   document.body.appendChild(bg);
   if (init) init(m);
+}
+
+// ---------- contact groups ----------
+let GROUPS = [];
+async function loadGroups() {
+  try { GROUPS = (await api('groups')).groups; } catch (e) { GROUPS = []; }
+  renderGroupRows();
+}
+function renderGroupRows() {
+  $$('.grpRow').forEach(row => {
+    const target = row.dataset.target;
+    row.innerHTML = (GROUPS.length ? '<span class="muted">Groups:</span>' : '') +
+      GROUPS.map(g => `<button type="button" class="g" data-g="${g.id}" title="${esc(g.emails.join(', '))}">+ ${esc(g.name)} (${g.emails.length})</button>`).join('') +
+      (target === 'chips' ? '<button type="button" class="lnk" data-save>Save as group</button>' : '') +
+      '<button type="button" class="lnk" data-manage>Manage groups</button>';
+    $$('[data-g]', row).forEach(b => b.onclick = () => {
+      const g = GROUPS.find(x => x.id === b.dataset.g); if (!g) return;
+      if (target === 'chips') { g.emails.forEach(e => { if (!emails.includes(e)) emails.push(e); }); renderChips(); }
+      else { const ta = $('#' + target); const cur = ta.value.split(/[\s,;]+/).filter(Boolean); ta.value = [...new Set([...cur, ...g.emails])].join(', '); }
+      toast(`Added ${g.name}`);
+    });
+    const sv = $('[data-save]', row); if (sv) sv.onclick = () => { takeEmails(); if (!emails.length) return toast('Add some emails first'); groupModal({ name: '', emails: [...emails] }); };
+    $('[data-manage]', row).onclick = manageGroups;
+  });
+}
+function groupModal(g) {
+  modal(`<h3>${g.id ? 'Edit group' : 'New contact group'}</h3>
+    <label class="f">Group name</label><input class="in" id="gName" maxlength="60" placeholder="e.g. Factory A – QA team" value="${esc(g.name || '')}">
+    <label class="f mt">Emails (separate with commas)</label><textarea class="in" id="gEmails" style="min-height:90px">${esc((g.emails || []).join(', '))}</textarea>`,
+    [{ t: 'Cancel' }, { t: 'Save group', pri: 1, fn: async (m) => {
+      await api('groups', { method: 'POST', body: { id: g.id, name: m.querySelector('#gName').value, emails: m.querySelector('#gEmails').value } });
+      toast('Group saved'); await loadGroups();
+    } }]);
+}
+function manageGroups() {
+  const list = GROUPS.length ? GROUPS.map(g => `<li><div class="fname"><b>${esc(g.name)}</b><span>${esc(g.emails.join(', '))}</span></div>
+      <button class="btn sm ghost" data-edit="${g.id}">Edit</button><button class="btn sm ghost danger" data-del="${g.id}">Delete</button></li>`).join('')
+    : '<p class="muted">No groups yet.</p>';
+  modal(`<h3>Contact groups</h3><ul class="flist" style="max-height:340px;overflow:auto">${list}</ul>`,
+    [{ t: 'Close' }, { t: '+ New group', pri: 1, fn: async () => { setTimeout(() => groupModal({}), 0); } }],
+    (m) => {
+      $$('[data-edit]', m).forEach(b => b.onclick = () => { m.parentNode.remove(); groupModal(GROUPS.find(x => x.id === b.dataset.edit)); });
+      $$('[data-del]', m).forEach(b => b.onclick = async () => {
+        if (!confirm('Delete this group?')) return;
+        await api('groups/' + b.dataset.del, { method: 'DELETE' }); await loadGroups(); m.parentNode.remove(); manageGroups();
+      });
+    });
+}
+
+// ---------- file requests ----------
+let REQS = [];
+$('#rqPwOn').onchange = () => $('#rqPw').classList.toggle('hide', !$('#rqPwOn').checked);
+$('#rqCreate').onclick = async () => {
+  const btn = $('#rqCreate');
+  if ($('#rqPwOn').checked && !$('#rqPw').value.trim()) return toast('Enter a password or switch it off');
+  btn.disabled = true;
+  try {
+    const r = await api('requests', { method: 'POST', body: {
+      title: $('#rqTitle').value, message: $('#rqMsg').value, recipients: $('#rqTo').value,
+      days: $('#rqDays').value, keepDays: $('#rqKeep').value, maxGb: $('#rqMax').value,
+      password: $('#rqPwOn').checked ? $('#rqPw').value.trim() : '' } });
+    $('#rqDone').classList.remove('hide'); $('#rqLink').value = r.link;
+    $('#rqWa').href = 'https://wa.me/?text=' + encodeURIComponent(`Please upload: ${$('#rqTitle').value}\n${r.link}`);
+    $('#rqQr').innerHTML = qrSvg(r.link); $('#rqQr').classList.add('hide');
+    $('#rqMail').innerHTML = (r.emailed || []).map(x => x.ok ? `<div style="color:var(--ok)">✓ Emailed ${esc(x.to)}</div>` : `<div style="color:var(--bad)">✕ ${esc(x.to)} — ${esc(x.error)}</div>`).join('');
+    saveContacts((r.emailed || []).filter(x => x.ok).map(x => x.to));
+    $('#rqTitle').value = ''; $('#rqMsg').value = ''; $('#rqTo').value = '';
+    toast('Upload link created'); loadReqs();
+  } catch (e) { toast(e.message, 5000); }
+  btn.disabled = false;
+};
+$('#rqCopy').onclick = () => copyText($('#rqLink').value);
+$('#rqQrBtn').onclick = () => $('#rqQr').classList.toggle('hide');
+async function loadReqs() {
+  try { REQS = (await api('requests')).requests; } catch (e) { $('#rqList').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (!REQS.length) { $('#rqList').innerHTML = '<div class="card empty" style="padding:40px 16px">No upload links yet.<br>Create one on the left and send it to your factory.</div>'; return; }
+  $('#rqList').innerHTML = REQS.map(r => {
+    const open = r.status === 'open' && r.expires_at > Date.now();
+    return `<div class="t ${open ? '' : 'exp'}" data-id="${r.id}">
+      <div class="t-title">${esc(r.title)}</div>
+      <div class="t-meta">Created ${fmtDate(r.created_at)} · up to ${fmtSize(r.max_bytes)} per upload · keeps files ${r.keep_days} days</div>
+      <div class="t-pills">
+        ${open ? `<span class="pill ok">Open · ${timeLeft(r.expires_at)}</span>` : '<span class="pill bad">Closed</span>'}
+        <span class="pill ${r.received ? 'in' : ''}">📥 ${r.received} upload${r.received !== 1 ? 's' : ''} received</span>
+        ${r.locked ? '<span class="pill">🔒 Password</span>' : ''}
+        ${r.recipients.length ? `<span class="pill" title="${esc(r.recipients.join(', '))}">✉ ${r.recipients.length}</span>` : ''}
+      </div>
+      <div class="t-acts">
+        ${open ? `<button class="btn sm pri" data-r="copy">Copy link</button>
+        <a class="btn sm" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent('Please upload: ' + r.title + '\n' + r.link)}">WhatsApp</a>
+        <button class="btn sm" data-r="email">Email</button>
+        <button class="btn sm" data-r="qr">QR</button>` : ''}
+        ${r.received ? '<button class="btn sm" data-r="view">View received</button>' : ''}
+        <div class="spacer"></div>
+        <button class="btn sm ghost" data-r="${open ? 'close' : 'reopen'}">${open ? 'Close' : 'Reopen'}</button>
+        <button class="btn sm ghost danger" data-r="del">Delete</button>
+      </div></div>`;
+  }).join('');
+  $$('#rqList [data-r]').forEach(b => b.onclick = () => reqAct(b.dataset.r, b.closest('.t').dataset.id));
+}
+function reqAct(a, id) {
+  const r = REQS.find(x => x.id === id);
+  if (a === 'copy') return copyText(r.link);
+  if (a === 'qr') return modal(`<h3>Scan to upload</h3><div class="qr">${qrSvg(r.link)}</div><p class="small muted" style="text-align:center;word-break:break-all">${esc(r.link)}</p>`, [{ t: 'Close' }]);
+  if (a === 'view') { show('list'); $('#q').value = r.title; filter = 'all'; $$('#fSeg button').forEach(x => x.classList.toggle('on', x.dataset.f === 'all')); return; }
+  if (a === 'close' || a === 'reopen') return api(`requests/${id}/close`, { method: 'POST', body: { open: a === 'reopen' } }).then(() => { toast(a === 'close' ? 'Link closed' : 'Link reopened'); loadReqs(); });
+  if (a === 'email') return modal(`<h3>Email this upload link</h3><label class="f">To (separate with commas)</label>
+      <textarea class="in" id="mTo" style="min-height:64px"></textarea><div class="grpRow" data-target="mTo"></div>`,
+    [{ t: 'Cancel' }, { t: 'Send email', pri: 1, fn: async (m) => {
+      const x = await api(`requests/${id}/email`, { method: 'POST', body: { recipients: m.querySelector('#mTo').value } });
+      const ok = x.emailed.filter(e => e.ok), bad = x.emailed.filter(e => !e.ok);
+      toast(bad.length ? `Sent ${ok.length}, failed ${bad.length}: ${bad[0].error}` : `Email sent to ${ok.length}`, 4500); loadReqs();
+    } }], () => renderGroupRows());
+  if (a === 'del') return modal(`<h3>Delete upload link?</h3><p class="muted">“${esc(r.title)}” will stop accepting uploads. Files already received stay in My transfers.</p>`,
+    [{ t: 'Cancel' }, { t: 'Delete', pri: 1, danger: 1, fn: async () => { await api('requests/' + id, { method: 'DELETE' }); toast('Deleted'); loadReqs(); } }]);
 }
 </script>
 </body>

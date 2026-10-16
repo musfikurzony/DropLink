@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DropLink — Upload Files</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b5bfd'/%3E%3Cpath d='M16 7v13M10 14l6 6 6-6M9 25h14' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+<style>
+  .box{max-width:680px;margin:0 auto}
+  .hero{display:flex;gap:16px;align-items:flex-start}
+  .hero .ic{width:54px;height:54px;border-radius:14px;background:#fff4e0;color:#c77700;display:grid;place-items:center;flex:none}
+  .hero .ic svg{width:26px;height:26px}
+  .hero h1{margin:0;font-size:22px;line-height:1.3;word-break:break-word}
+  .msg{margin-top:16px;padding:14px 16px;background:var(--bg);border-radius:12px;white-space:pre-wrap;font-size:14.5px;color:var(--ink2)}
+  .drop{border:2px dashed #c9d1ea;border-radius:14px;padding:30px 18px;text-align:center;cursor:pointer;transition:.15s;background:#fbfcff}
+  .drop.over{border-color:var(--pri);background:var(--pri-soft)}
+  .drop .big{width:54px;height:54px;border-radius:50%;background:var(--pri-soft);color:var(--pri);display:grid;place-items:center;margin:0 auto 10px}
+  .drop .big svg{width:26px;height:26px}
+  .addrow{display:flex;gap:8px;justify-content:center;margin-top:12px;flex-wrap:wrap}
+  .files{max-height:300px;overflow:auto}
+  .center{text-align:center;padding:30px 10px}
+  .ic2{width:64px;height:64px;border-radius:50%;display:grid;place-items:center;margin:0 auto 12px;font-size:28px}
+  .prog-big{font-size:40px;font-weight:700;letter-spacing:-1px}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap"><a class="brand" href="#" onclick="return false"><div class="logo"></div><span>DropLink</span></a></div></header>
+<main><div class="wrap"><div class="box">
+
+  <div class="card center" id="sLoad"><p class="muted">Loading…</p></div>
+
+  <div class="card center hide" id="sGone">
+    <div class="ic2" style="background:var(--bad-soft);color:var(--bad)">!</div>
+    <h2 style="margin:0 0 6px" id="goneTitle">Upload link not available</h2>
+    <p class="muted" id="goneTxt" style="margin:0"></p>
+  </div>
+
+  <div class="card hide" id="sLock" style="max-width:420px;margin:0 auto;text-align:center">
+    <div class="ic2" style="background:var(--pri-soft);color:var(--pri)">🔒</div>
+    <h2 style="margin:0 0 4px" id="lockTitle"></h2>
+    <p class="muted small" style="margin:0 0 16px">This upload page is password protected.</p>
+    <form id="lockForm"><input class="in" id="lpw" type="password" placeholder="Enter password" required>
+      <button class="btn pri big mt" style="width:100%">Continue</button>
+      <p id="lockErr" class="small" style="color:var(--bad);min-height:18px;margin:8px 0 0"></p></form>
+  </div>
+
+  <div class="hide" id="sForm">
+    <div class="card">
+      <div class="hero">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M20 16v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3"/></svg></div>
+        <div style="flex:1;min-width:0">
+          <div class="small muted" id="from"></div>
+          <h1 id="rTitle"></h1>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px" id="pills"></div>
+        </div>
+      </div>
+      <div class="msg hide" id="rMsg"></div>
+    </div>
+
+    <div class="card mt">
+      <div class="row">
+        <div><label class="f" for="uName">Your name *</label><input class="in" id="uName" maxlength="80" placeholder="e.g. Rahim – ABC Garments QA"></div>
+        <div><label class="f" for="uEmail">Your email</label><input class="in" id="uEmail" type="email" maxlength="120" placeholder="optional"></div>
+      </div>
+      <label class="f mt" for="uNote">Note</label>
+      <textarea class="in" id="uNote" maxlength="2000" placeholder="optional — e.g. which PO / style these files are for"></textarea>
+
+      <div class="drop mt" id="drop">
+        <div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M20 16v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3"/></svg></div>
+        <b>Drop files or folders here</b>
+        <div class="muted small">or click to choose · any file type</div>
+        <div class="addrow"><button class="btn sm" type="button" id="addFiles">+ Add files</button><button class="btn sm" type="button" id="addFolder">+ Add folder</button></div>
+      </div>
+      <input type="file" id="fileIn" multiple hidden>
+      <input type="file" id="dirIn" webkitdirectory multiple hidden>
+      <div id="fileArea" class="hide">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:14px 0 4px"><b id="sumTxt"></b><button class="btn ghost sm danger" id="clearAll" type="button">Clear all</button></div>
+        <ul class="flist files" id="fileList"></ul>
+      </div>
+      <button class="btn pri big mt" style="width:100%" id="sendBtn" disabled>Upload files</button>
+      <p class="small muted" id="hint" style="text-align:center;margin:8px 0 0"></p>
+    </div>
+  </div>
+
+  <div class="card hide" id="uploading">
+    <div style="text-align:center">
+      <div class="prog-big" id="pPct">0%</div>
+      <div class="muted" id="pInfo">Starting…</div>
+      <div class="bar mt" style="height:10px"><i id="pBar"></i></div>
+    </div>
+    <ul class="flist mt" id="pFiles" style="max-height:300px;overflow:auto"></ul>
+    <div style="text-align:center" class="mt"><button class="btn danger" id="cancelBtn">Cancel upload</button></div>
+  </div>
+
+  <div class="card center hide" id="sDone">
+    <div class="ic2" style="background:var(--ok-soft);color:var(--ok)">✓</div>
+    <h2 style="margin:0 0 6px">Files received — thank you!</h2>
+    <p class="muted" id="doneTxt" style="margin:0"></p>
+    <button class="btn mt" id="again">Upload more files</button>
+  </div>
+
+</div></div></main>
+<footer class="credit">Developed by Musfikur Rahman | Copyright © <span class="yr"></span></footer>
+
+<script src="/common.js"></script>
+<script src="/uploader.js"></script>
+<script>
+const RID = location.pathname.split('/').filter(Boolean).pop();
+let Q = null, K = '', picked = [], current = null;
+try { K = sessionStorage.getItem('rq_k_' + RID) || ''; } catch (e) {}
+const view = (v) => ['sLoad', 'sGone', 'sLock', 'sForm', 'uploading', 'sDone'].forEach(x => $('#' + x).classList.toggle('hide', x !== v));
+
+async function load() {
+  let r, d;
+  try { r = await fetch('/api/rq/' + encodeURIComponent(RID)); d = await r.json(); }
+  catch (e) { $('#goneTxt').textContent = 'Could not connect. Please check your internet and refresh.'; return view('sGone'); }
+  if (r.status === 410) { $('#goneTitle').textContent = 'This upload link is closed'; $('#goneTxt').textContent = `“${d.title}” is no longer accepting files. Please contact ${d.sender || 'the sender'}.`; return view('sGone'); }
+  if (!r.ok) { $('#goneTxt').textContent = d.error || 'Link not found.'; return view('sGone'); }
+  Q = d; document.title = 'Upload: ' + d.title + ' — DropLink';
+  if (d.locked && !K) { $('#lockTitle').textContent = d.title; view('sLock'); $('#lpw').focus(); return; }
+  render();
+}
+$('#lockForm').onsubmit = async (e) => {
+  e.preventDefault(); $('#lockErr').textContent = '';
+  const r = await fetch(`/api/rq/${RID}/unlock`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: $('#lpw').value }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { $('#lockErr').textContent = d.error || 'Wrong password'; return; }
+  K = d.token; try { sessionStorage.setItem('rq_k_' + RID, K); } catch (e) {}
+  render();
+};
+function render() {
+  $('#from').textContent = Q.sender ? `${Q.sender} is requesting files` : 'Files requested';
+  $('#rTitle').textContent = Q.title;
+  $('#pills').innerHTML = `<span class="pill ok">Open until ${fmtDate(Q.expires_at)}</span><span class="pill">Max ${fmtSize(Q.max_bytes)}</span>`;
+  if (Q.message) { $('#rMsg').textContent = Q.message; $('#rMsg').classList.remove('hide'); }
+  try { $('#uName').value = localStorage.getItem('rq_name') || ''; $('#uEmail').value = localStorage.getItem('rq_email') || ''; } catch (e) {}
+  view('sForm'); renderPicked();
+}
+
+// ---- pick files ----
+const drop = $('#drop');
+drop.onclick = (e) => { if (!e.target.closest('button')) $('#fileIn').click(); };
+$('#addFiles').onclick = () => $('#fileIn').click();
+$('#addFolder').onclick = () => $('#dirIn').click();
+$('#fileIn').onchange = (e) => { addFiles([...e.target.files].map(f => ({ file: f, path: f.name }))); e.target.value = ''; };
+$('#dirIn').onchange = (e) => { addFiles([...e.target.files].map(f => ({ file: f, path: f.webkitRelativePath || f.name }))); e.target.value = ''; };
+['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => e.preventDefault());
+drop.addEventListener('drop', async (e) => {
+  const entries = [...(e.dataTransfer.items || [])].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!entries.length) return addFiles([...e.dataTransfer.files].map(f => ({ file: f, path: f.name })));
+  const out = [];
+  async function walk(entry, prefix) {
+    if (entry.isFile) { const f = await new Promise((res, rej) => entry.file(res, rej)); out.push({ file: f, path: prefix + f.name }); }
+    else if (entry.isDirectory) { const rd = entry.createReader(); let b; do { b = await new Promise((res, rej) => rd.readEntries(res, rej)); for (const en of b) await walk(en, prefix + entry.name + '/'); } while (b.length); }
+  }
+  for (const en of entries) await walk(en, '');
+  addFiles(out);
+});
+function addFiles(list) {
+  const seen = new Set(picked.map(p => p.path + '|' + p.file.size));
+  for (const p of list) {
+    if (/(^|\/)(\.DS_Store|Thumbs\.db|desktop\.ini)$/i.test(p.path)) continue;
+    if (!seen.has(p.path + '|' + p.file.size)) { picked.push(p); seen.add(p.path + '|' + p.file.size); }
+  }
+  renderPicked();
+}
+function renderPicked() {
+  const total = picked.reduce((s, p) => s + p.file.size, 0);
+  $('#fileArea').classList.toggle('hide', !picked.length);
+  $('#sumTxt').textContent = `${picked.length} file${picked.length !== 1 ? 's' : ''} · ${fmtSize(total)}`;
+  $('#fileList').innerHTML = picked.map((p, i) => `<li>${fileIcon(p.path)}<div class="fname"><b title="${esc(p.path)}">${esc(p.path)}</b><span>${fmtSize(p.file.size)}</span></div>
+     <button class="btn ghost sm" data-rm="${i}" title="Remove">✕</button></li>`).join('');
+  $$('#fileList [data-rm]').forEach(b => b.onclick = () => { picked.splice(+b.dataset.rm, 1); renderPicked(); });
+  const tooBig = Q && total > Q.max_bytes;
+  $('#hint').innerHTML = tooBig ? `<span style="color:var(--bad)">Too large — maximum ${fmtSize(Q.max_bytes)} per upload.</span>` : '';
+  $('#sendBtn').disabled = !picked.length || tooBig;
+}
+$('#clearAll').onclick = () => { picked = []; renderPicked(); };
+
+// ---- upload ----
+$('#sendBtn').onclick = async () => {
+  const name = $('#uName').value.trim();
+  if (!name) { $('#uName').focus(); return toast('Please enter your name'); }
+  try { localStorage.setItem('rq_name', name); localStorage.setItem('rq_email', $('#uEmail').value.trim()); } catch (e) {}
+  $('#sendBtn').disabled = true;
+  view('uploading'); $('#pInfo').textContent = `Preparing ${picked.length} file${picked.length > 1 ? 's' : ''}…`; $('#pFiles').innerHTML = '';
+  let t;
+  try {
+    const r = await fetch(`/api/rq/${RID}/transfers`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, email: $('#uEmail').value.trim(), note: $('#uNote').value.trim(), k: K,
+        files: picked.map(p => ({ name: p.path, size: p.file.size, type: p.file.type })) }) });
+    t = await r.json();
+    if (!r.ok) throw new Error(t.error || 'Error ' + r.status);
+  } catch (e) { view('sForm'); $('#sendBtn').disabled = false; return toast(e.message, 6000); }
+  const H = { 'x-up': t.up };
+  const state = { t, cancelled: false, xhrs: new Set() };
+  current = state;
+  const items = t.files.map((f, i) => ({ ...f, file: picked[i].file, loaded: 0 }));
+  const { failed, total } = await runUpload(items, state, H);
+  if (state.cancelled) return;
+  if (failed) {
+    $('#pInfo').innerHTML = `<span style="color:var(--bad)">Upload failed: ${esc(failed.message)}. Please check your connection and try again.</span>`;
+    $('#cancelBtn').textContent = 'Back'; $('#cancelBtn').onclick = () => { current = null; view('sForm'); $('#sendBtn').disabled = false; };
+    return;
+  }
+  $('#pPct').textContent = '100%'; $('#pBar').style.width = '100%'; $('#pInfo').textContent = 'Finishing…';
+  try { await api(`rq/${RID}/finalize`, { method: 'POST', body: { tid: t.id }, headers: H }); }
+  catch (e) { $('#pInfo').innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`; return; }
+  state.finished = true;
+  $('#doneTxt').textContent = `${items.length} file${items.length > 1 ? 's' : ''} (${fmtSize(total)}) delivered to ${Q.sender || 'the sender'}.`;
+  view('sDone');
+};
+$('#cancelBtn').onclick = () => {
+  if (!current || !confirm('Cancel this upload?')) return;
+  current.cancelled = true; current.xhrs.forEach(x => x.abort()); current = null;
+  view('sForm'); $('#sendBtn').disabled = false; toast('Upload cancelled');
+};
+$('#again').onclick = () => { picked = []; current = null; $('#uNote').value = ''; render(); };
+window.addEventListener('beforeunload', (e) => { if (current && !current.finished && !current.cancelled) { e.preventDefault(); e.returnValue = ''; } });
+load();
+</script>
+</body>
+</html>
